@@ -1,0 +1,225 @@
+service:
+  name: udagram-plant-app
+
+plugins:
+  - serverless-webpack
+  - serverless-aws-documentation
+  - serverless-reqvalidator-plugin
+  - serverless-iam-roles-per-function
+  - serverless-plugin-tracing
+custom:
+  webpack:
+    webpackConfig: ./webpack.config.js
+    includeModules: true
+    packagerOptions:
+      scripts:
+
+documentation:
+    api:
+      info:
+        version: 1.0.0
+        title: Plant API
+        description: serverless API for a plant app 
+    models:
+      - name: CreatePlant
+        contentType: application/json
+        schema: ${file(validators/create-plant-request.json)}
+      - name: UpdatePlant
+        contentType: application/json
+        schema: ${file(validators/update-plant-request.json)}    
+provider:
+  name: aws
+  runtime: nodejs12.x
+  apiGateway:
+    minimumCompressionSize: 1024 # Enable gzip compression for responses > 1 KB
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+    PLANT_TABLE: plants-tchek-${self:provider.stage}
+    IMAGES_BUCKET: plants-tchek-${self:provider.stage}
+    USER_ID_INDEX: userId
+  tracing:
+    lambda: true
+    apiGateway: true
+
+iamRoleStatements:
+  - Effect: Allow
+    Action:
+      - codedeploy:*
+    Resource:
+      - '*'
+      
+functions:
+
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+ 
+  GetPlants:
+    handler: src/lambda/http/getPlants.handler
+    events:
+      - http:
+          method: get
+          path: plants
+          authorizer: Auth
+          cors: true
+
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PLANT_TABLE}
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PLANT_TABLE}/index/${self:provider.environment.USER_ID_INDEX}
+    - Effect: Allow
+      Action:
+        - s3:PutObject
+        - s3:GetObject
+      Resource: arn:aws:s3:::${self:provider.environment.IMAGES_BUCKET}/*
+
+  
+  CreatePlant:
+    handler: src/lambda/http/createPlant.handler
+    events:
+      - http:
+          method: post
+          path: plants
+          authorizer: Auth
+          cors: true
+          reqValidatorName: RequestBodyValidator
+          documentation:
+            summary: create new plant item 
+            description: create a plant item
+            requestModels:
+              'application/json': CreatePlant
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:PutItem
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PLANT_TABLE}
+    - Effect: Allow
+      Action:
+        - s3:PutObject
+        - s3:GetObject
+      Resource: arn:aws:s3:::${self:provider.environment.IMAGES_BUCKET}/*
+
+  
+  UpdatePlant:
+    handler: src/lambda/http/updatePlant.handler
+    events:
+      - http:
+          method: patch
+          path: plants/{Id}
+          authorizer: Auth
+          cors: true
+          reqValidatorName: RequestBodyValidator
+          documentation:
+            summary: update a saved plant item 
+            description: update a plant item
+            requestModels:
+              'application/json': UpdatePlant
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:UpdateItem
+        - dynamodb:Query
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PLANT_TABLE}
+    - Effect: Allow
+      Action:
+        - s3:PutObject
+      Resource: arn:aws:s3:::${self:provider.environment.IMAGES_BUCKET}/*
+
+  DeletePlant:
+    handler: src/lambda/http/deletePlant.handler
+    events:
+      - http:
+          method: delete
+          path: plants/{Id}
+          authorizer: Auth
+          cors: true
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:DeleteItem
+          - dynamodb:Query
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PLANT_TABLE}
+
+  # PLANT: Configure this function
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    events:
+      - http:
+          method: post
+          path: plants/{Id}/attachment
+          authorizer: Auth
+          cors: true    
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PLANT_TABLE}
+    - Effect: Allow
+      Action:
+        - s3:PutObject
+        - s3:GetObject
+      Resource: arn:aws:s3:::${self:provider.environment.IMAGES_BUCKET}/*
+
+resources:
+  Resources:
+    RequestBodyValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      Properties:
+        Name: 'request-body-validator'
+        RestApiId:
+          Ref: 'ApiGatewayRestApi'
+        ValidateRequestBody: true
+        ValidateRequestParameters: false
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS,POST'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: 'ApiGatewayRestApi'
+    PlantDynamoDbTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: Id
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: Id
+            KeyType: HASH
+          - AttributeName: userId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.USER_ID_INDEX}
+            KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:provider.environment.PLANT_TABLE}
+    PlantBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.IMAGES_BUCKET}
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders:
+                - "*"
+              AllowedMethods:
+                - GET
+                - POST
+                - PUT
+              AllowedOrigins:
+                - "*"
